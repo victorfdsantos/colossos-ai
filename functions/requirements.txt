@@ -1,0 +1,5 @@
+firebase_functions~=0.5.0
+firebase-admin>=6.0.0
+google-generativeai
+requests>=2.31.0
+pydantic
