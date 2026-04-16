@@ -1,22 +1,52 @@
-import json
+"""
+Orquestrador principal do Colossos.
+
+Responsabilidades:
+  1. Receber o webhook do canal de mensagens.
+  2. Identificar o usuário.
+  3. Rotear para o módulo correto:
+
+     ┌─ onboarding_complete = False  →  onboarding.py
+     │
+     └─ onboarding_complete = True
+          ├─ current_setup = "diet"      →  diet_setup.py
+          ├─ current_setup = "training"  →  training_setup.py
+          ├─ menu principal              →  detecta opção e inicia setup
+          └─ (demais agentes — próximas iterações)
+
+Nenhuma lógica de negócio aqui — só roteamento.
+"""
+
 from firebase_functions import https_fn
 from firebase_admin import initialize_app, firestore
-from onboarding import process_onboarding
-from intent import detect_intent
-from diet import handle_diet, query_food
-from training import handle_training, query_exercise
-from plan import generate_plan
-from helpers import send_telegram_message
 
+from onboarding import process_onboarding, send_main_menu
+from diet_setup import process_diet_setup, STEP_ALERGIAS as DIET_STEP_INICIO
+from training_setup import process_training_setup, STEP_NIVEL as TRAINING_STEP_INICIO
+from messenger import send_message
+
+# Valores normalizados das opções do menu principal
+_MENU_DIETA  = "montar dieta"
+_MENU_TREINO = "montar plano de treino"
+
+# ---------------------------------------------------------------------------
+# Inicialização única do Firebase
+# ---------------------------------------------------------------------------
 _app = None
-_db = None
+_db  = None
 
-def get_db():
+
+def _get_db():
     global _app, _db
     if _app is None:
         _app = initialize_app()
-        _db = firestore.client()
+        _db  = firestore.client()
     return _db
+
+
+# ---------------------------------------------------------------------------
+# Endpoint principal
+# ---------------------------------------------------------------------------
 
 @https_fn.on_request()
 def handle_message(req: https_fn.Request) -> https_fn.Response:
@@ -24,35 +54,75 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
     if not body or "message" not in body:
         return https_fn.Response("ok", status=200)
 
-    db = get_db()
+    db = _get_db()
 
-    message = body["message"]
+    message     = body["message"]
     telegram_id = str(message["from"]["id"])
-    text = message.get("text", "")
+    text        = message.get("text", "").strip()
 
-    # Responde Telegram imediatamente (evita retry por timeout)
-    response = https_fn.Response("ok", status=200)
+    ok = https_fn.Response("ok", status=200)
 
-    user_ref = db.collection("users").document(telegram_id)
-    user_doc = user_ref.get()
+    if not text:
+        send_message(telegram_id, "Por enquanto só consigo processar mensagens de texto. 😊")
+        return ok
 
-    # Onboarding
-    if not user_doc.exists or not user_doc.to_dict().get("onboarding_complete"):
+    user_ref  = db.collection("users").document(telegram_id)
+    user_doc  = user_ref.get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+
+    # ------------------------------------------------------------------
+    # 1. Onboarding ainda não concluído
+    # ------------------------------------------------------------------
+    if not user_data.get("onboarding_complete"):
         process_onboarding(telegram_id, text, user_doc, db)
-        return response
+        return ok
 
-    # Roteamento por intenção
-    intent = detect_intent(text)
-    reply = ""
+    # ------------------------------------------------------------------
+    # 2. Usuário está no meio de um setup de dieta
+    # ------------------------------------------------------------------
+    if user_data.get("current_setup") == "diet":
+        process_diet_setup(telegram_id, text, user_doc, db)
 
-    if intent == "diet":          reply = handle_diet(text, telegram_id, db)
-    elif intent == "training":    reply = handle_training(text, telegram_id, db)
-    elif intent == "food_info":   reply = query_food(text, db)
-    elif intent == "exercise_info": reply = query_exercise(text, db)
-    elif intent == "food_swap":   reply = handle_diet(text, telegram_id, db)
-    elif intent == "exercise_swap": reply = handle_training(text, telegram_id, db)
-    elif intent == "generate_plan": reply = generate_plan(telegram_id, db)
-    else: reply = "Pode me perguntar sobre seu treino ou dieta!"
+        # Limpa o setup ativo quando concluído
+        if user_ref.get().to_dict().get("diet_setup_complete"):
+            user_ref.set({"current_setup": None}, merge=True)
+        return ok
 
-    send_telegram_message(telegram_id, reply)
-    return response
+    # ------------------------------------------------------------------
+    # 3. Usuário está no meio de um setup de treino
+    # ------------------------------------------------------------------
+    if user_data.get("current_setup") == "training":
+        process_training_setup(telegram_id, text, user_doc, db)
+        
+        if user_ref.get().to_dict().get("training_setup_complete"):
+            user_ref.set({"current_setup": None}, merge=True)
+        return ok
+
+    # ------------------------------------------------------------------
+    # 4. Menu principal — detecta opção escolhida
+    # ------------------------------------------------------------------
+    text_lower = text.lower()
+
+    if text_lower == _MENU_DIETA:
+        user_ref.set(
+            {"current_setup": "diet", "current_setup_step": DIET_STEP_INICIO},
+            merge=True,
+        )
+        # Recarrega user_doc com o step recém-gravado
+        process_diet_setup(telegram_id, text, user_ref.get(), db)
+        return ok
+
+    if text_lower == _MENU_TREINO:
+        user_ref.set(
+            {"current_setup": "training", "current_setup_step": TRAINING_STEP_INICIO},
+            merge=True,
+        )
+        process_training_setup(telegram_id, text, user_ref.get(), db)
+        return ok
+
+    # ------------------------------------------------------------------
+    # 5. Mensagem não reconhecida → exibe menu principal
+    # ------------------------------------------------------------------
+    nome = user_data.get("name", "")
+    send_main_menu(telegram_id, db, nome)
+    return ok
