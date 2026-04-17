@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from messenger import send_message, send_menu
 from action_logger import log_action
 from menus import (
-    send_main_menu,
     send_edit_profile_menu,
     send_invalid_option,
     OPT_EDIT_NOME,
@@ -32,7 +31,7 @@ from menus import (
 # Steps deste módulo
 # ---------------------------------------------------------------------------
 STEP_MENU          = "profile_edit_menu"
-STEP_AGUARDA_VALOR = "profile_edit_aguarda_valor"   # aguarda o novo valor digitado
+STEP_AGUARDA_VALOR = "profile_edit_aguarda_valor"  
 STEP_CONFIRMA      = "profile_edit_confirma"
 
 # ---------------------------------------------------------------------------
@@ -81,7 +80,12 @@ def _validate(field_key: str, text: str) -> dict:
 
     if field_key == OPT_EDIT_IDADE:
         try:
-            age = int(text.strip())
+            match = re.search(r"\d+[.,]?\d*", text)
+            if not match:
+                raise ValueError
+            
+            age = int(float(match.group().replace(",", ".")))
+            
             if not (10 <= age <= 100):
                 raise ValueError
             return {"ok": True, "value": age}
@@ -90,7 +94,12 @@ def _validate(field_key: str, text: str) -> dict:
 
     if field_key == OPT_EDIT_PESO:
         try:
-            w = round(float(text.strip().replace(",", ".")), 1)
+            match = re.search(r"\d+[.,]?\d*", text)
+            if not match:
+                raise ValueError
+
+            w = int(float(match.group().replace(",", ".")))
+
             if not (30 <= w <= 300):
                 raise ValueError
             return {"ok": True, "value": w}
@@ -99,7 +108,12 @@ def _validate(field_key: str, text: str) -> dict:
 
     if field_key == OPT_EDIT_ALTURA:
         try:
-            h = int(float(text.strip().replace(",", ".")))
+            match = re.search(r"\d+[.,]?\d*", text)
+            if not match:
+                raise ValueError
+
+            h = int(float(match.group().replace(",", ".")))
+
             if not (100 <= h <= 250):
                 raise ValueError
             return {"ok": True, "value": h}
@@ -171,7 +185,6 @@ def process_profile_edit(telegram_id: str, text: str, user_doc, db) -> None:
         if resp == OPT_EDIT_VOLTAR:
             log_action(db, telegram_id, "profile_edit_Selecao", "menu_selecao", "Voltar")
             user_ref.set({"current_setup": None, "current_setup_step": None}, merge=True)
-            send_main_menu(telegram_id, db, nome)
             return
 
         if resp not in FIELD_META:
@@ -259,7 +272,6 @@ def process_profile_edit(telegram_id: str, text: str, user_doc, db) -> None:
             nome = new_value
 
         send_message(telegram_id, f"✅ *{FIELD_META[field_key][0].capitalize()}* atualizado com sucesso!")
-        send_main_menu(telegram_id, db, nome)
         return
 
     # ------------------------------------------------------------------

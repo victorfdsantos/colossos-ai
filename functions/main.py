@@ -6,26 +6,37 @@ Roteamento:
   current_setup = "diet"       →  diet_setup.py
   current_setup = "training"   →  training_setup.py
   current_setup = "profile"    →  profile_edit.py
-  menu principal               →  detecta opção via menus.py e inicia fluxo
-  texto não reconhecido        →  exibe menu principal
-
-Nenhuma lógica de negócio aqui — só roteamento.
+  texto livre                  →  intent_router.py classifica e despacha
 """
 
 from firebase_functions import https_fn
 from firebase_admin import initialize_app, firestore
 
-from profile.onboarding import process_onboarding
-from diet.diet_setup import process_diet_setup, STEP_ALERGIAS as DIET_STEP_INICIO
-from training.training_setup import process_training_setup, STEP_NIVEL as TRAINING_STEP_INICIO
-from profile.profile_edit import process_profile_edit, STEP_MENU as PROFILE_STEP_INICIO
-from messenger import send_message
-from menus import (
-    send_main_menu,
-    OPT_MONTAR_DIETA,
-    OPT_MONTAR_TREINO,
-    OPT_EDITAR_PERFIL,
+from onboarding import process_onboarding
+from diet_setup import process_diet_setup, STEP_ALERGIAS as DIET_STEP_INICIO
+from training_setup import process_training_setup, STEP_NIVEL as TRAINING_STEP_INICIO
+from profile_edit import (
+    process_profile_edit,
+    STEP_MENU as PROFILE_STEP_INICIO,
+    STEP_AGUARDA_VALOR as PROFILE_STEP_AGUARDA,
 )
+from messenger import send_message
+from menus import send_help_message, send_main_menu_secundary, send_main_menu
+from intent_router import (
+    classify_intent,
+    INTENT_MONTAR_DIETA,
+    INTENT_MONTAR_TREINO,
+    INTENT_EDITAR_PERFIL,
+    INTENT_EDITAR_NOME,
+    INTENT_EDITAR_IDADE,
+    INTENT_EDITAR_PESO,
+    INTENT_EDITAR_ALTURA,
+    INTENT_EDITAR_OBJETIVO,
+    INTENT_AJUDA,
+    INTENT_OLA,
+    INTENT_NAVEGACAO
+)
+from menus import OPT_EDIT_NOME, OPT_EDIT_IDADE, OPT_EDIT_PESO, OPT_EDIT_ALTURA, OPT_EDIT_OBJETIVO
 
 # ---------------------------------------------------------------------------
 # Inicialização única do Firebase
@@ -40,6 +51,18 @@ def _get_db():
         _app = initialize_app()
         _db  = firestore.client()
     return _db
+
+
+# ---------------------------------------------------------------------------
+# Mapa: intent de edição direta → campo do profile_edit
+# ---------------------------------------------------------------------------
+_EDIT_FIELD_MAP = {
+    INTENT_EDITAR_NOME:     OPT_EDIT_NOME,
+    INTENT_EDITAR_IDADE:    OPT_EDIT_IDADE,
+    INTENT_EDITAR_PESO:     OPT_EDIT_PESO,
+    INTENT_EDITAR_ALTURA:   OPT_EDIT_ALTURA,
+    INTENT_EDITAR_OBJETIVO: OPT_EDIT_OBJETIVO,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +99,8 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
         return ok
 
     # ------------------------------------------------------------------
-    # 2. Fluxo ativo (diet / training / profile)
+    # 2. Fluxo ativo — usuário já está no meio de um setup
+    #    Neste caso NÃO passa pelo roteador: vai direto para o handler.
     # ------------------------------------------------------------------
     current_setup = user_data.get("current_setup")
 
@@ -92,14 +116,16 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
 
     if current_setup == "profile":
         process_profile_edit(telegram_id, text, user_doc, db)
-        return ok   # profile_edit limpa current_setup internamente
+        return ok
 
     # ------------------------------------------------------------------
-    # 3. Seleção no menu principal
+    # 3. Nenhum fluxo ativo → classifica intenção via LLM
     # ------------------------------------------------------------------
-    text_lower = text.lower()
+    intent = classify_intent(text)
+    nome   = user_data.get("name", "")
 
-    if text_lower == OPT_MONTAR_DIETA:
+    # --- Dieta ---
+    if intent == INTENT_MONTAR_DIETA:
         user_ref.set(
             {"current_setup": "diet", "current_setup_step": DIET_STEP_INICIO},
             merge=True,
@@ -107,7 +133,8 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
         process_diet_setup(telegram_id, text, user_ref.get(), db)
         return ok
 
-    if text_lower == OPT_MONTAR_TREINO:
+    # --- Treino ---
+    if intent == INTENT_MONTAR_TREINO:
         user_ref.set(
             {"current_setup": "training", "current_setup_step": TRAINING_STEP_INICIO},
             merge=True,
@@ -115,7 +142,8 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
         process_training_setup(telegram_id, text, user_ref.get(), db)
         return ok
 
-    if text_lower == OPT_EDITAR_PERFIL:
+    # --- Editar perfil (menu genérico) ---
+    if intent == INTENT_EDITAR_PERFIL:
         user_ref.set(
             {"current_setup": "profile", "current_setup_step": PROFILE_STEP_INICIO},
             merge=True,
@@ -123,11 +151,47 @@ def handle_message(req: https_fn.Request) -> https_fn.Response:
         process_profile_edit(telegram_id, text, user_ref.get(), db)
         return ok
 
-    # ------------------------------------------------------------------
-    # 4. Texto não reconhecido → menu principal
-    # ------------------------------------------------------------------
-    nome = user_data.get("name", "")
-    send_main_menu(telegram_id, db, nome)
+    # --- Editar campo específico diretamente ---
+    if intent in _EDIT_FIELD_MAP:
+        field_key = _EDIT_FIELD_MAP[intent]
+        # Pula o menu de seleção e vai direto para aguardar o valor
+        user_ref.set(
+            {
+                "current_setup":       "profile",
+                "current_setup_step":  PROFILE_STEP_AGUARDA,
+                "editing_field":       field_key,
+            },
+            merge=True,
+        )
+        # Reutiliza o handler — ele vai cair no step AGUARDA_VALOR
+        process_profile_edit(telegram_id, text, user_ref.get(), db)
+        return ok
+
+    # --- Ajuda ---
+    if intent == INTENT_AJUDA:
+        send_help_message(telegram_id, nome)
+        return ok
+    
+    # --- Navegação ---
+    if intent == INTENT_NAVEGACAO:
+        send_main_menu_secundary(telegram_id, db, nome)
+        return ok
+
+    # --- Ola ---
+    if intent == INTENT_OLA:
+        send_message(
+            telegram_id,
+            "Olá!",
+        )
+        send_main_menu(telegram_id, db, nome)
+        return ok
+
+    # --- Desconhecido ---
+    send_message(
+        telegram_id,
+        "Não entendi muito bem. 😅\n\n"
+        "Você pode me dizer o que quer fazer, ou enviar *!help* para ver tudo que sei fazer.",
+    )
     return ok
 
 
