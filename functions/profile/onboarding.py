@@ -3,30 +3,49 @@ Onboarding do Colossos — coleta do perfil base.
 
 Fluxo:
   welcome → nome → objetivo → altura → peso → idade
-  → agradecimento + menu principal
+  → confirmacao (exibe resumo) → concluido + menu principal
 
-Sem IA. Sem setup de dieta/treino aqui — cada um tem seu próprio módulo.
+Sem IA. Menus centralizados em menus.py.
 """
+
+import re
+from datetime import datetime, timezone
 
 from messenger import send_message, send_menu
 from action_logger import log_action
+from menus import send_main_menu
 
 # ---------------------------------------------------------------------------
-# Steps deste módulo
+# Steps
 # ---------------------------------------------------------------------------
-STEP_WELCOME      = "welcome"
-STEP_NOME         = "nome"
-STEP_NOME_AGUARDA = "nome_aguarda"
-STEP_OBJETIVO     = "objetivo"
-STEP_ALTURA       = "altura"
-STEP_PESO         = "peso"
-STEP_IDADE        = "idade"
-STEP_CONCLUIDO    = "concluido"
+STEP_WELCOME       = "welcome"
+STEP_NOME          = "nome"
+STEP_NOME_AGUARDA  = "nome_aguarda"
+STEP_OBJETIVO      = "objetivo"
+STEP_ALTURA        = "altura"
+STEP_PESO          = "peso"
+STEP_IDADE         = "idade"
+STEP_CONFIRMACAO   = "confirmacao"
+STEP_CONCLUIDO     = "concluido"
+
+# ---------------------------------------------------------------------------
+# Constantes de validação
+# ---------------------------------------------------------------------------
+NOME_MIN_CHARS = 2
+NOME_MAX_CHARS = 40
+# Permite letras (incluindo acentuadas), espaços e hífens — nada mais
+NOME_REGEX     = re.compile(r"^[A-Za-zÀ-ÿ\s\-]+$")
 
 OBJETIVO_MAP = {
     "hipertrofia":    "hipertrofia",
     "emagrecimento":  "emagrecimento",
     "ganho de massa": "ganho_de_massa",
+}
+
+OBJETIVO_LABEL = {
+    "hipertrofia":   "Hipertrofia",
+    "emagrecimento": "Emagrecimento",
+    "ganho_de_massa": "Ganho de Massa",
 }
 
 # ---------------------------------------------------------------------------
@@ -35,10 +54,12 @@ OBJETIVO_MAP = {
 
 def _parse_nome(text: str) -> dict:
     t = text.strip()
-    if len(t) < 2:
-        return {"ok": False, "error": "Por favor, informe um nome com pelo menos 2 caracteres."}
-    if any(c.isdigit() for c in t):
-        return {"ok": False, "error": "❌ Nome não deve conter números. Tente novamente."}
+    if len(t) < NOME_MIN_CHARS:
+        return {"ok": False, "error": f"❌ Nome muito curto. Mínimo {NOME_MIN_CHARS} caracteres."}
+    if len(t) > NOME_MAX_CHARS:
+        return {"ok": False, "error": f"❌ Nome muito longo. Máximo {NOME_MAX_CHARS} caracteres."}
+    if not NOME_REGEX.match(t):
+        return {"ok": False, "error": "❌ Nome inválido. Use apenas letras e espaços."}
     return {"ok": True, "value": t.title()}
 
 
@@ -80,22 +101,30 @@ def _parse_option(text: str, valid_map: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Menu principal — chamado aqui e também pelo main.py quando necessário
+# Helpers internos
 # ---------------------------------------------------------------------------
 
-def send_main_menu(telegram_id: str, db, nome: str = "") -> None:
-    """Exibe o menu principal de funcionalidades."""
-    greeting = f", *{nome}*" if nome else ""
-    log_action(db, telegram_id, "menu_principal_exibicao", "Exibicao")
-    send_menu(
-        telegram_id,
-        f"O que você gostaria de fazer{greeting}?",
-        ["Montar Dieta", "Montar Plano de Treino"],
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _build_confirmation_text(data: dict) -> str:
+    """Monta o resumo do perfil para confirmação."""
+    objetivo_raw = data.get("goal", "")
+    objetivo_str = OBJETIVO_LABEL.get(objetivo_raw, objetivo_raw.replace("_", " ").title())
+    return (
+        "📋 *Confira seus dados antes de confirmar:*\n\n"
+        f"👤 Nome: *{data.get('name', '—')}*\n"
+        f"🎯 Objetivo: *{objetivo_str}*\n"
+        f"📏 Altura: *{data.get('height_cm', '—')} cm*\n"
+        f"⚖️ Peso: *{data.get('weight_kg', '—')} kg*\n"
+        f"🎂 Idade: *{data.get('age', '—')} anos*\n\n"
+        "Está tudo certo?"
     )
 
 
 # ---------------------------------------------------------------------------
-# Orquestrador do onboarding
+# Orquestrador
 # ---------------------------------------------------------------------------
 
 def process_onboarding(telegram_id: str, text: str, user_doc, db) -> None:
@@ -203,25 +232,67 @@ def process_onboarding(telegram_id: str, text: str, user_doc, db) -> None:
         return
 
     # ------------------------------------------------------------------
-    # IDADE → conclui onboarding + menu principal
+    # IDADE
     # ------------------------------------------------------------------
     if step == STEP_IDADE:
         result = _parse_idade(text)
         if not result["ok"]:
             send_message(telegram_id, result["error"])
             return
-        nome = data.get("name", "")
         log_action(db, telegram_id, "idade_Selecao", "Input", result["value"])
+        user_ref.set({"age": result["value"], "onboarding_step": STEP_CONFIRMACAO}, merge=True)
+
+        # Recarrega data com a idade recém-gravada para exibir no resumo
+        updated_data = {**data, "age": result["value"]}
+        log_action(db, telegram_id, "confirmacao_exibicao", "Exibicao")
+        send_menu(
+            telegram_id,
+            _build_confirmation_text(updated_data),
+            ["Confirmar", "Recomeçar"],
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # CONFIRMAÇÃO
+    # ------------------------------------------------------------------
+    if step == STEP_CONFIRMACAO:
+        resp = text.strip().lower()
+
+        if resp == "recomeçar":
+            log_action(db, telegram_id, "confirmacao_Selecao", "menu_selecao", "Recomeçar")
+            # Apaga dados do perfil e reinicia do nome
+            user_ref.set(
+                {
+                    "name": None, "goal": None, "height_cm": None,
+                    "weight_kg": None, "age": None,
+                    "onboarding_step": STEP_NOME,
+                },
+                merge=True,
+            )
+            log_action(db, telegram_id, "nome_exibicao", "Exibicao")
+            send_message(telegram_id, "Tudo bem, vamos recomeçar! 🔄\n\nComo você quer ser chamado?")
+            user_ref.set({"onboarding_step": STEP_NOME_AGUARDA}, merge=True)
+            return
+
+        if resp != "confirmar":
+            send_menu(telegram_id, "❌ Use os botões para confirmar ou recomeçar.",
+                      ["Confirmar", "Recomeçar"])
+            return
+
+        now = _now_utc()
+        log_action(db, telegram_id, "confirmacao_Selecao", "menu_selecao", "Confirmar")
         user_ref.set(
             {
-                "age":                result["value"],
-                "onboarding_step":    STEP_CONCLUIDO,
-                "onboarding_complete": True,
+                "onboarding_step":       STEP_CONCLUIDO,
+                "onboarding_complete":   True,
+                "onboarding_created_at": now,
+                "onboarding_updated_at": now,
             },
             merge=True,
         )
         log_action(db, telegram_id, "onboarding_concluido", "Concluido")
 
+        nome = data.get("name", "")
         send_message(
             telegram_id,
             f"Perfeito, *{nome}*! 🙌\n\n"

@@ -94,7 +94,7 @@ def process_training_setup(telegram_id: str, text: str, user_doc, db) -> None:
         )
 
         # Volta ao menu principal
-        from onboarding import send_main_menu
+        from menus import send_main_menu
         send_main_menu(telegram_id, db, nome)
         return
 

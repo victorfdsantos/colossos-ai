@@ -82,14 +82,14 @@ def process_diet_setup(telegram_id: str, text: str, user_doc, db) -> None:
     # ALERGIAS — loop "tem mais?"
     # ------------------------------------------------------------------
     if step == STEP_ALERGIAS_MAIS:
-        resp = text.strip().lower().replace("ã", "a").replace("õ", "o")
+        resp = text.strip().lower()
         if resp == "sim":
             user_ref.set({"current_setup_step": f"{STEP_ALERGIAS}_aguarda"}, merge=True)
             send_message(telegram_id,
                 "Envie as restrições adicionais (separadas por vírgula):")
             return
 
-        if resp != "nao":
+        if resp != "não":
             send_menu(telegram_id, "❌ Por favor, escolha uma opção:", ["Sim", "Não"])
             return
 
@@ -156,7 +156,7 @@ def process_diet_setup(telegram_id: str, text: str, user_doc, db) -> None:
         )
 
         # Volta ao menu principal
-        from onboarding import send_main_menu
+        from menus import send_main_menu
         send_main_menu(telegram_id, db, nome)
         return
 
