@@ -1,11 +1,13 @@
 """
-Onboarding do Colossos — coleta do perfil base.
+Onboarding e edição de perfil do Colossos.
 
-Fluxo:
-  welcome → nome → objetivo → altura → peso → idade
-  → confirmacao (exibe resumo) → concluido + menu principal
+O fluxo é declarado em FIELDS — uma lista ordenada de campos.
+Cada campo sabe como perguntar, validar e onde salvar no Firestore.
 
-Sem IA. Menus centralizados em menus.py.
+Onboarding novo  → percorre FIELDS do início ao fim.
+Edição de campo  → pula direto para o campo indicado em `editing_field`.
+
+Um único ponto de entrada: process_onboarding().
 """
 
 import re
@@ -16,294 +18,285 @@ from action_logger import log_action
 from menus import send_main_menu
 
 # ---------------------------------------------------------------------------
-# Steps
-# ---------------------------------------------------------------------------
-STEP_WELCOME       = "welcome"
-STEP_NOME          = "nome"
-STEP_NOME_AGUARDA  = "nome_aguarda"
-STEP_OBJETIVO      = "objetivo"
-STEP_ALTURA        = "altura"
-STEP_PESO          = "peso"
-STEP_IDADE         = "idade"
-STEP_CONFIRMACAO   = "confirmacao"
-STEP_CONCLUIDO     = "concluido"
-
-# ---------------------------------------------------------------------------
-# Constantes de validação
-# ---------------------------------------------------------------------------
-NOME_MIN_CHARS = 2
-NOME_MAX_CHARS = 40
-# Permite letras (incluindo acentuadas), espaços e hífens — nada mais
-NOME_REGEX     = re.compile(r"^[A-Za-zÀ-ÿ\s\-]+$")
-
-OBJETIVO_MAP = {
-    "hipertrofia":    "hipertrofia",
-    "emagrecimento":  "emagrecimento",
-    "ganho de massa": "ganho_de_massa",
-}
-
-OBJETIVO_LABEL = {
-    "hipertrofia":   "Hipertrofia",
-    "emagrecimento": "Emagrecimento",
-    "ganho_de_massa": "Ganho de Massa",
-}
-
-# ---------------------------------------------------------------------------
-# Validações puras (sem IA)
+# Validadores
 # ---------------------------------------------------------------------------
 
-def _parse_nome(text: str) -> dict:
+def _parse_nome(text):
     t = text.strip()
-    if len(t) < NOME_MIN_CHARS:
-        return {"ok": False, "error": f"❌ Nome muito curto. Mínimo {NOME_MIN_CHARS} caracteres."}
-    if len(t) > NOME_MAX_CHARS:
-        return {"ok": False, "error": f"❌ Nome muito longo. Máximo {NOME_MAX_CHARS} caracteres."}
-    if not NOME_REGEX.match(t):
+    if len(t) < 2 or len(t) > 40:
+        return {"ok": False, "error": "❌ Nome inválido. Use entre 2 e 40 caracteres."}
+    if not re.match(r"^[A-Za-zÀ-ÿ\s\-]+$", t):
         return {"ok": False, "error": "❌ Nome inválido. Use apenas letras e espaços."}
     return {"ok": True, "value": t.title()}
 
+def _parse_objetivo(text):
+    opts = {"hipertrofia": "hipertrofia", "emagrecimento": "emagrecimento", "ganho de massa": "ganho_de_massa"}
+    v = opts.get(text.strip().lower())
+    return {"ok": True, "value": v} if v else {"ok": False, "error": "❌ Escolha uma das opções."}
 
-def _parse_altura(text: str) -> dict:
+def _parse_altura(text):
     try:
-        h = int(float(text.strip().replace(",", ".")))
-        if not (100 <= h <= 250):
-            raise ValueError
-        return {"ok": True, "value": h}
-    except ValueError:
-        return {"ok": False, "error": "❌ Altura inválida. Informe em centímetros, ex: *178*"}
+        v = int(float(re.search(r"[\d.,]+", text).group().replace(",", ".")))
+        if not (100 <= v <= 250): raise ValueError
+        return {"ok": True, "value": v}
+    except:
+        return {"ok": False, "error": "❌ Altura inválida. Informe em cm, ex: *178*"}
 
-
-def _parse_peso(text: str) -> dict:
+def _parse_peso(text):
     try:
-        w = round(float(text.strip().replace(",", ".")), 1)
-        if not (30 <= w <= 300):
-            raise ValueError
-        return {"ok": True, "value": w}
-    except ValueError:
-        return {"ok": False, "error": "❌ Peso inválido. Informe em quilogramas, ex: *83* ou *83.5*"}
+        v = round(float(re.search(r"[\d.,]+", text).group().replace(",", ".")), 1)
+        if not (30 <= v <= 300): raise ValueError
+        return {"ok": True, "value": v}
+    except:
+        return {"ok": False, "error": "❌ Peso inválido. Informe em kg, ex: *83.5*"}
 
-
-def _parse_idade(text: str) -> dict:
+def _parse_idade(text):
     try:
-        age = int(text.strip())
-        if not (10 <= age <= 100):
-            raise ValueError
-        return {"ok": True, "value": age}
-    except ValueError:
+        v = int(re.search(r"\d+", text).group())
+        if not (10 <= v <= 100): raise ValueError
+        return {"ok": True, "value": v}
+    except:
         return {"ok": False, "error": "❌ Idade inválida. Informe apenas o número, ex: *25*"}
 
 
-def _parse_option(text: str, valid_map: dict) -> dict:
-    key = text.strip().lower()
-    if key in valid_map:
-        return {"ok": True, "value": valid_map[key]}
-    return {"ok": False, "error": "❌ Opção inválida. Escolha uma das opções disponíveis."}
+# ---------------------------------------------------------------------------
+# Declaração dos campos — ordem = ordem do onboarding
+# ---------------------------------------------------------------------------
+
+FIELDS = [
+    {
+        "key":      "name",
+        "label":    "nome",
+        "ask":      "Como você quer ser chamado?",
+        "validate": _parse_nome,
+        "type":     "text",
+    },
+    {
+        "key":      "goal",
+        "label":    "objetivo",
+        "ask":      "Qual é o seu objetivo?",
+        "validate": _parse_objetivo,
+        "type":     "menu",
+        "options":  ["Hipertrofia", "Emagrecimento", "Ganho de Massa"],
+        "display":  {"hipertrofia": "Hipertrofia", "emagrecimento": "Emagrecimento", "ganho_de_massa": "Ganho de Massa"},
+    },
+    {
+        "key":      "height_cm",
+        "label":    "altura",
+        "ask":      "Qual a sua altura em centímetros?\n_Exemplo: 178_",
+        "validate": _parse_altura,
+        "type":     "text",
+        "unit":     "cm",
+    },
+    {
+        "key":      "weight_kg",
+        "label":    "peso",
+        "ask":      "Qual o seu peso em quilogramas?\n_Exemplo: 83_",
+        "validate": _parse_peso,
+        "type":     "text",
+        "unit":     "kg",
+    },
+    {
+        "key":      "age",
+        "label":    "idade",
+        "ask":      "Qual a sua idade?\n_Exemplo: 25_",
+        "validate": _parse_idade,
+        "type":     "text",
+        "unit":     "anos",
+    },
+]
+
+# Lookup rápido por key
+_FIELD_BY_KEY = {f["key"]: f for f in FIELDS}
 
 
 # ---------------------------------------------------------------------------
-# Helpers internos
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+def _ask(telegram_id, field):
+    """Envia a pergunta do campo — texto livre ou menu de opções."""
+    if field["type"] == "menu":
+        send_menu(telegram_id, field["ask"], field["options"])
+    else:
+        send_message(telegram_id, field["ask"])
 
+def _display_value(field, value):
+    """Formata o valor para exibição (confirmação, resumo)."""
+    if "display" in field:
+        return field["display"].get(value, value)
+    if "unit" in field:
+        return f"{value} {field['unit']}"
+    return str(value)
 
-def _build_confirmation_text(data: dict) -> str:
-    """Monta o resumo do perfil para confirmação."""
-    objetivo_raw = data.get("goal", "")
-    objetivo_str = OBJETIVO_LABEL.get(objetivo_raw, objetivo_raw.replace("_", " ").title())
-    return (
-        "📋 *Confira seus dados antes de confirmar:*\n\n"
-        f"👤 Nome: *{data.get('name', '—')}*\n"
-        f"🎯 Objetivo: *{objetivo_str}*\n"
-        f"📏 Altura: *{data.get('height_cm', '—')} cm*\n"
-        f"⚖️ Peso: *{data.get('weight_kg', '—')} kg*\n"
-        f"🎂 Idade: *{data.get('age', '—')} anos*\n\n"
-        "Está tudo certo?"
-    )
+def _next_field(current_key):
+    """Retorna o próximo campo na sequência, ou None se for o último."""
+    keys = [f["key"] for f in FIELDS]
+    idx  = keys.index(current_key)
+    return FIELDS[idx + 1] if idx + 1 < len(FIELDS) else None
+
+def _build_summary(data):
+    icons = {"name": "👤", "goal": "🎯", "height_cm": "📏", "weight_kg": "⚖️", "age": "🎂"}
+    lines = ["📋 *Confira seus dados antes de confirmar:*\n"]
+    for f in FIELDS:
+        value = data.get(f["key"], "—")
+        shown = _display_value(f, value) if value != "—" else "—"
+        lines.append(f"{icons[f['key']]} {f['label'].capitalize()}: *{shown}*")
+    lines.append("\nEstá tudo certo?")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Orquestrador
+# Ponto de entrada único
 # ---------------------------------------------------------------------------
 
-def process_onboarding(telegram_id: str, text: str, user_doc, db) -> None:
-    """Chamado pelo main.py enquanto onboarding_complete=False."""
+def process_onboarding(telegram_id, text, user_doc, db):
+    """
+    Onboarding novo e edição de perfil num único fluxo.
 
+    Steps no Firestore (onboarding_step):
+      "welcome"          → boas-vindas iniciais
+      "awaiting_<key>"   → aguardando resposta para o campo <key>
+      "confirm_new"      → confirmação do onboarding completo
+      "confirm_edit"     → confirmação de edição de campo único
+      "concluido"        → perfil completo, fluxo inativo
+    """
     data     = user_doc.to_dict() if user_doc.exists else {}
-    step     = data.get("onboarding_step", STEP_WELCOME)
+    step     = data.get("onboarding_step", "welcome")
     user_ref = db.collection("users").document(telegram_id)
+    nome     = data.get("name", "")
 
     # ------------------------------------------------------------------
-    # WELCOME
+    # Boas-vindas
     # ------------------------------------------------------------------
-    if step == STEP_WELCOME:
-        user_ref.set({"telegram_id": telegram_id, "onboarding_step": STEP_NOME}, merge=True)
+    if step == "welcome":
         log_action(db, telegram_id, "onboarding_inicial", "Exibicao")
-        send_menu(
-            telegram_id,
+        user_ref.set({"telegram_id": telegram_id, "onboarding_step": "awaiting_start"}, merge=True)
+        send_menu(telegram_id,
             "Olá! Eu sou o *Colossos*, seu agente esportivo 💪\n\n"
             "Vou te ajudar a montar seu treino e sua dieta personalizados.\n\n"
             "Vamos começar?",
-            ["Sim", "Não"],
-        )
+            ["Sim", "Não"])
         return
 
-    # ------------------------------------------------------------------
-    # NOME — processa resposta ao "Vamos começar?"
-    # ------------------------------------------------------------------
-    if step == STEP_NOME:
-        resp = text.strip().lower()
-        if resp == "não":
-            log_action(db, telegram_id, "onboarding_inicial_Selecao", "Selecao", "Não")
+    if step == "awaiting_start":
+        if text.strip().lower() == "não":
             send_message(telegram_id, "Sem problemas! 😊 Quando quiser, é só me chamar.")
             return
-
-        log_action(db, telegram_id, "onboarding_inicial_Selecao", "Selecao", "Sim")
-        log_action(db, telegram_id, "nome_exibicao", "Exibicao")
-        send_message(telegram_id, "Ótimo! 🎉 Como você quer ser chamado?")
-        user_ref.set({"onboarding_step": STEP_NOME_AGUARDA}, merge=True)
+        first = FIELDS[0]
+        user_ref.set({"onboarding_step": f"awaiting_{first['key']}"}, merge=True)
+        log_action(db, telegram_id, f"onboarding_{first['key']}_exibicao", "Exibicao")
+        _ask(telegram_id, first)
         return
 
     # ------------------------------------------------------------------
-    # NOME — aguarda digitação
+    # Coleta de campo — serve tanto para onboarding novo quanto para edição
     # ------------------------------------------------------------------
-    if step == STEP_NOME_AGUARDA:
-        result = _parse_nome(text)
+    if step.startswith("awaiting_"):
+        key   = step.removeprefix("awaiting_")
+        field = _FIELD_BY_KEY.get(key)
+
+        if not field:
+            user_ref.set({"onboarding_step": "welcome"}, merge=True)
+            send_message(telegram_id, "Ops, algo deu errado. Vamos recomeçar! 🔄")
+            return
+
+        result = field["validate"](text)
         if not result["ok"]:
             send_message(telegram_id, result["error"])
+            _ask(telegram_id, field)
             return
-        nome = result["value"]
-        log_action(db, telegram_id, "nome_Selecao", "Input", nome)
-        user_ref.set({"name": nome, "onboarding_step": STEP_OBJETIVO}, merge=True)
 
-        log_action(db, telegram_id, "objetivo_exibicao", "Exibicao")
-        send_menu(
-            telegram_id,
-            f"Prazer, *{nome}*! 💪\n\nQual é o seu objetivo?",
-            ["Hipertrofia", "Emagrecimento", "Ganho de Massa"],
-        )
+        log_action(db, telegram_id, f"onboarding_{key}_selecao", "input", result["value"])
+        user_ref.set({field["key"]: result["value"]}, merge=True)
+
+        if data.get("editing_field"):
+            # Edição — vai para confirmação de campo único
+            user_ref.set({"onboarding_step": "confirm_edit", "pending_edit_value": result["value"]}, merge=True)
+            shown = _display_value(field, result["value"])
+            send_menu(telegram_id,
+                f"Confirma a alteração?\n\n*{field['label'].capitalize()}*: {shown}",
+                ["Confirmar", "Cancelar"])
+
+        else:
+            # Onboarding novo — avança para o próximo campo ou vai para confirmação final
+            next_f = _next_field(key)
+            if next_f:
+                user_ref.set({"onboarding_step": f"awaiting_{next_f['key']}"}, merge=True)
+                log_action(db, telegram_id, f"onboarding_{next_f['key']}_exibicao", "Exibicao")
+                _ask(telegram_id, next_f)
+            else:
+                user_ref.set({"onboarding_step": "confirm_new"}, merge=True)
+                log_action(db, telegram_id, "onboarding_confirmacao_exibicao", "Exibicao")
+                send_menu(telegram_id, _build_summary({**data, field["key"]: result["value"]}), ["Confirmar", "Recomeçar"])
         return
 
     # ------------------------------------------------------------------
-    # OBJETIVO
+    # Confirmação — onboarding novo
     # ------------------------------------------------------------------
-    if step == STEP_OBJETIVO:
-        result = _parse_option(text, OBJETIVO_MAP)
-        if not result["ok"]:
-            send_menu(telegram_id, result["error"] + "\n\nQual é o seu objetivo?",
-                      ["Hipertrofia", "Emagrecimento", "Ganho de Massa"])
-            return
-        log_action(db, telegram_id, "objetivo_Selecao", "menu_selecao", result["value"])
-        user_ref.set({"goal": result["value"], "onboarding_step": STEP_ALTURA}, merge=True)
-
-        log_action(db, telegram_id, "altura_exibicao", "Exibicao")
-        send_message(telegram_id, "Qual a sua altura em centímetros?\n_Exemplo: 178_")
-        return
-
-    # ------------------------------------------------------------------
-    # ALTURA
-    # ------------------------------------------------------------------
-    if step == STEP_ALTURA:
-        result = _parse_altura(text)
-        if not result["ok"]:
-            send_message(telegram_id, result["error"])
-            return
-        log_action(db, telegram_id, "altura_Selecao", "Input", result["value"])
-        user_ref.set({"height_cm": result["value"], "onboarding_step": STEP_PESO}, merge=True)
-
-        log_action(db, telegram_id, "peso_exibicao", "Exibicao")
-        send_message(telegram_id, "Qual o seu peso em quilogramas?\n_Exemplo: 83_")
-        return
-
-    # ------------------------------------------------------------------
-    # PESO
-    # ------------------------------------------------------------------
-    if step == STEP_PESO:
-        result = _parse_peso(text)
-        if not result["ok"]:
-            send_message(telegram_id, result["error"])
-            return
-        log_action(db, telegram_id, "peso_Selecao", "Input", result["value"])
-        user_ref.set({"weight_kg": result["value"], "onboarding_step": STEP_IDADE}, merge=True)
-
-        log_action(db, telegram_id, "idade_exibicao", "Exibicao")
-        send_message(telegram_id, "Qual a sua idade?\n_Exemplo: 25_")
-        return
-
-    # ------------------------------------------------------------------
-    # IDADE
-    # ------------------------------------------------------------------
-    if step == STEP_IDADE:
-        result = _parse_idade(text)
-        if not result["ok"]:
-            send_message(telegram_id, result["error"])
-            return
-        log_action(db, telegram_id, "idade_Selecao", "Input", result["value"])
-        user_ref.set({"age": result["value"], "onboarding_step": STEP_CONFIRMACAO}, merge=True)
-
-        # Recarrega data com a idade recém-gravada para exibir no resumo
-        updated_data = {**data, "age": result["value"]}
-        log_action(db, telegram_id, "confirmacao_exibicao", "Exibicao")
-        send_menu(
-            telegram_id,
-            _build_confirmation_text(updated_data),
-            ["Confirmar", "Recomeçar"],
-        )
-        return
-
-    # ------------------------------------------------------------------
-    # CONFIRMAÇÃO
-    # ------------------------------------------------------------------
-    if step == STEP_CONFIRMACAO:
+    if step == "confirm_new":
         resp = text.strip().lower()
 
         if resp == "recomeçar":
-            log_action(db, telegram_id, "confirmacao_Selecao", "menu_selecao", "Recomeçar")
-            # Apaga dados do perfil e reinicia do nome
-            user_ref.set(
-                {
-                    "name": None, "goal": None, "height_cm": None,
-                    "weight_kg": None, "age": None,
-                    "onboarding_step": STEP_NOME,
-                },
-                merge=True,
-            )
-            log_action(db, telegram_id, "nome_exibicao", "Exibicao")
-            send_message(telegram_id, "Tudo bem, vamos recomeçar! 🔄\n\nComo você quer ser chamado?")
-            user_ref.set({"onboarding_step": STEP_NOME_AGUARDA}, merge=True)
+            reset = {f["key"]: None for f in FIELDS}
+            reset["onboarding_step"] = f"awaiting_{FIELDS[0]['key']}"
+            user_ref.set(reset, merge=True)
+            send_message(telegram_id, "Tudo bem, vamos recomeçar! 🔄")
+            _ask(telegram_id, FIELDS[0])
             return
 
         if resp != "confirmar":
-            send_menu(telegram_id, "❌ Use os botões para confirmar ou recomeçar.",
-                      ["Confirmar", "Recomeçar"])
+            send_menu(telegram_id, "❌ Use os botões.", ["Confirmar", "Recomeçar"])
             return
 
-        now = _now_utc()
-        log_action(db, telegram_id, "confirmacao_Selecao", "menu_selecao", "Confirmar")
-        user_ref.set(
-            {
-                "onboarding_step":       STEP_CONCLUIDO,
-                "onboarding_complete":   True,
-                "onboarding_created_at": now,
-                "onboarding_updated_at": now,
-            },
-            merge=True,
-        )
+        now = datetime.now(timezone.utc)
+        user_ref.set({
+            "onboarding_step":       "concluido",
+            "onboarding_complete":   True,
+            "onboarding_created_at": now,
+            "onboarding_updated_at": now,
+        }, merge=True)
         log_action(db, telegram_id, "onboarding_concluido", "Concluido")
-
-        nome = data.get("name", "")
-        send_message(
-            telegram_id,
+        send_message(telegram_id,
             f"Perfeito, *{nome}*! 🙌\n\n"
             "Recebi todas as suas informações básicas.\n"
-            "A partir daqui posso te ajudar a montar seu treino e sua dieta de forma personalizada.",
-        )
+            "A partir daqui posso te ajudar a montar seu treino e sua dieta de forma personalizada.")
         send_main_menu(telegram_id, db, nome)
         return
 
     # ------------------------------------------------------------------
-    # Fallback
+    # Confirmação — edição de campo único
     # ------------------------------------------------------------------
-    user_ref.set({"onboarding_step": STEP_WELCOME}, merge=True)
-    send_message(telegram_id, "Ops, algo deu errado. Vamos recomeçar! 🔄")
+    if step == "confirm_edit":
+        resp = text.strip().lower()
+
+        if resp == "cancelar":
+            user_ref.set({
+                "current_setup": None, "current_setup_step": None,
+                "editing_field": None, "pending_edit_value": None,
+                "onboarding_step": "concluido",
+            }, merge=True)
+            send_message(telegram_id, "Alteração cancelada.")
+            send_main_menu(telegram_id, db, nome)
+            return
+
+        if resp != "confirmar":
+            send_menu(telegram_id, "❌ Use os botões.", ["Confirmar", "Cancelar"])
+            return
+
+        field     = _FIELD_BY_KEY.get(data.get("editing_field", ""))
+        new_value = data.get("pending_edit_value")
+        if field:
+            log_action(db, telegram_id, f"edit_{field['key']}_concluido", "Concluido", new_value)
+            nome_final = new_value if field["key"] == "name" else nome
+            user_ref.set({
+                "onboarding_updated_at": datetime.now(timezone.utc),
+                "current_setup":         None,
+                "current_setup_step":    None,
+                "editing_field":         None,
+                "pending_edit_value":    None,
+                "onboarding_step":       "concluido",
+            }, merge=True)
+            send_message(telegram_id, f"✅ *{field['label'].capitalize()}* atualizado com sucesso!")
+            send_main_menu(telegram_id, db, nome_final)
+        return
